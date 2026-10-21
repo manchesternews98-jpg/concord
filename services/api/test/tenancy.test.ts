@@ -639,6 +639,19 @@ describe("networks", () => {
     for (const weak of ["1024:8:1", "20000:8:1", "32768:8", "nope"]) {
       expect(() => loadConfig({ CONCORD_PASSWORD_COST: weak }), weak).toThrow(/CONCORD_PASSWORD_COST/);
     }
+
+    const withHeaders = loadConfig({
+      CONCORD_MAINNET_RPC_URLS: "https://x.example:8443/rpc, https://y.example:8443/rpc, https://z.example/rpc",
+      CONCORD_RPC_HEADERS: JSON.stringify({
+        "x.example": { "x-api-key": "fallback-key" },
+        "y.example": { "x-api-key": "hostname-key" },
+        "y.example:8443": { "x-api-key": "exact-key" },
+        "z.example": { "x-api-key": "standard-key" },
+      }),
+    });
+    expect(withHeaders.networks.mainnet.rpc[0]?.headers).toEqual({ "x-api-key": "fallback-key" });
+    expect(withHeaders.networks.mainnet.rpc[1]?.headers).toEqual({ "x-api-key": "exact-key" });
+    expect(withHeaders.networks.mainnet.rpc[2]?.headers).toEqual({ "x-api-key": "standard-key" });
   });
 });
 
