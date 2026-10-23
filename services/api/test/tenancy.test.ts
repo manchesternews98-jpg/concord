@@ -640,6 +640,7 @@ describe("networks", () => {
     for (const weak of ["1024:8:1", "20000:8:1", "32768:8", "nope"]) {
       expect(() => loadConfig({ CONCORD_PASSWORD_COST: weak }), weak).toThrow(/CONCORD_PASSWORD_COST/);
     }
+    expect(() => loadConfig({ PORT: "70000" })).toThrow("PORT must be a whole number from 1 to 65535");
 
     const withHeaders = loadConfig({
       CONCORD_MAINNET_RPC_URLS: "https://x.example:8443/rpc, https://y.example:8443/rpc, https://z.example/rpc",
@@ -653,6 +654,16 @@ describe("networks", () => {
     expect(withHeaders.networks.mainnet.rpc[0]?.headers).toEqual({ "x-api-key": "fallback-key" });
     expect(withHeaders.networks.mainnet.rpc[1]?.headers).toEqual({ "x-api-key": "exact-key" });
     expect(withHeaders.networks.mainnet.rpc[2]?.headers).toEqual({ "x-api-key": "standard-key" });
+    for (const truthy of ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"]) {
+      expect(loadConfig({ CONCORD_EPHEMERAL: truthy }).ephemeral, truthy).toBe(true);
+    }
+    for (const falsy of ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF"]) {
+      expect(loadConfig({ CONCORD_EPHEMERAL: falsy }).ephemeral, falsy).toBe(false);
+    }
+    expect(loadConfig({}).ephemeral).toBe(false);
+    for (const junk of ["maybe", "2", "none", "enabled"]) {
+      expect(() => loadConfig({ CONCORD_EPHEMERAL: junk }), junk).toThrow(/CONCORD_EPHEMERAL must be a boolean flag/);
+    }
     expect(loadConfig({ CONCORD_RPC_HEADERS: '{"mainnet.sorobanrpc.com": {"Authorization": "Bearer token"}}' })).toBeDefined();
     for (const invalid of [
       "null",
