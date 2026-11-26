@@ -37,6 +37,7 @@ A pack covers the window `[from, to]`. Both bounds are inclusive.
 
 | Section                                  | Filtered by period?                                 | Field compared   |
 | :--------------------------------------- | :-------------------------------------------------- | :--------------- |
+| `registers`                        | Yes                                                 | `asOf` (and any register referenced by a run) |
 | `reconciliations`                        | Yes                                                 | the run's `asOf` |
 | `corporateActions`                       | Yes                                                 | `recordTime`     |
 | `controls.records`                       | Yes                                                 | `closedAt`       |
@@ -55,23 +56,40 @@ _Source: `services/api/src/concord.ts`, `auditExport` (`inPeriod = (t) => t >= f
 
 | Key                | Contents                                                                                                                                                                                                                           |
 | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`    | Version of the pack's shape, currently `1`. Bumped on a breaking change (see `docs/versioning.md`)                                                                                                                                 |
 | `generatedAt`      | ISO 8601 time the pack was generated                                                                                                                                                                                               |
 | `generator`        | Generator identifier. Currently the fixed string `concord/0.1.0`                                                                                                                                                                   |
 | `sha256`           | SHA-256 hex digest of the pack content, see below                                                                                                                                                                                  |
 | `asset`            | The watched asset and its indexing state: `id`, `network`, `code`, `issuer`, `name`, `decimals`, `indexedFromLedger`, `baselineLedger`, `historyFrom`, `indexedToLedger`, `indexedTo`, `ignoredAddresses`. Unset values are `null` |
 | `period`           | `{ from, to }` as applied                                                                                                                                                                                                          |
 | `holdings`         | Ledger state as of `to`: `asOf`, `ledger`, `supply`, `holderCount`, `incomplete`, `holders`                                                                                                                                        |
+| `registers`        | Imported register files whose `asOf` is in the period (and any register referenced by a reconciliation run in the period): `id`, `asOf`, `source`, `sha256`, `positions`, `issues`, `importedBy`, `importedAt` |
 | `reconciliations`  | Reconciliation runs whose `asOf` is in the period, oldest first, each with its `breaks`                                                                                                                                            |
 | `corporateActions` | Corporate actions (`dividend`, `split` or `redemption`) whose `recordTime` is in the period, newest first                                                                                                                          |
 | `controls`         | The controls log: `asOf`, `summary`, `records`, `pending`, `breaks`, `openBreaks`. `records` is filtered by period and listed newest first                                                                                         |
 | `signoffHistory`   | Every sign-off change, oldest first: `scope`, `key`, `fingerprint`, `status`, `note`, `author`, `at`. A break acknowledged by one person and resolved by another shows both entries.  Not narrowed by the period                              |
 | `events`           | Indexed ledger events closed in the period, in ascending `id` order                                                                                                                                                                |
 
+### History coverage
+
+Every reconciliation in `reconciliations` and every corporate action `result` in `corporateActions` carries `coverage`, the instant range its figures can be trusted for:
+
+| Field      | Meaning                                                                                                                                                                                         |
+| :--------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from`     | Start of the indexed history: `historyFrom` for `window` mode, otherwise the close time of the first indexed event. A `baseline` asset with no events yet uses the time it was watched. `null` when unknown |
+| `to`       | `indexedTo`, the close time of the last ledger read when the result was computed. `null` before the first sync                                                                                  |
+| `mode`     | How history starts: `baseline` (opening balances from Horizon), `ledger` (a start ledger the caller named) or `window` (the oldest ledger the RPC holds)                                        |
+| `complete` | `true` only when the run's `asOf`, or the action's `recordTime`, is within `[from, to]`. When `false`, activity outside the range is not reflected and the result also carries a warning      |
+
+A corporate action whose record time the chain has not reached yet has no `result`, and so no `coverage`, until its holdings are snapshotted. Results stored before coverage was added have none until they are recomputed.
+
+_Source: `services/api/src/concord.ts`, `coverage`._
+
 ### The `sha256` digest
 
-The digest covers `asset`, `period`, `holdings`, `reconciliations`, `corporateActions`, `controls` and `events`, serialised with `JSON.stringify` in that key order. It does not cover `generatedAt`, `generator` or `sha256` itself. Two packs built from the same data and period have the same digest.
+The digest is the SHA-256 of the pack serialised as RFC 8785 canonical JSON, leaving out `sha256`, `generatedAt`, `keyId` and `signature`. It covers `generator`, `asset`, `period`, `holdings`, `registers`, `reconciliations`, `corporateActions`, `controls`, `signoffHistory` and `events`. Canonical JSON sorts every object's keys by UTF-16 code units and fixes the number formatting, so key order in the file does not change the digest, while editing any value does. Two packs built from the same data and period have the same digest. Check a pack file with `concord verify-pack FILE` (add `--key PUBLIC.pem` to check its signature too), or the `verifyPack` helper.
 
-_Source: `services/api/src/concord.ts`, `auditExport`, `holdings`, `controls`, `eventJson`._
+_Source: `services/api/src/concord.ts`, `auditExport`, `canonicalJson`, `auditPackDigest`, `verifyPack`, `holdings`, `controls`, `eventJson`._
 
 ## CSV sections
 
@@ -160,3 +178,9 @@ Discrepancies collected from three places, in this order: reconciliation runs in
 | `noteAuthor`    | Who signed the note                                                                                                                                                                                                                                                                                                                                                                          |
 
 _Source: `services/api/src/concord.ts` (`exportCsv`, `reconcile` and `annotate`), `packages/core/src/{reconcile,movements,distributions,controls}.ts`._
+
+## Printable reconciliation report
+
+`GET /api/reconciliations/:id/report` returns one reconciliation run as a self-contained HTML page with print styles. It carries the run summary, the chain coverage the run was computed against, the register SHA-256 and a SHA-256 of the stored run result, every break with its current note, and the full sign-off history for each break. All user-supplied text is HTML-escaped. The route needs the same workspace session as the JSON run route and returns `404` for a run in another workspace.
+
+_Source: `services/api/src/api.ts` (report route), `services/api/src/concord.ts` (`runReport`)._

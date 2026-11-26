@@ -34,12 +34,59 @@ A `docs`-only or internal refactoring commit does not need an entry. When in dou
 
 Everything to date; Concord's history begins 2026-10 with the commits below.
 
+### Changed
+
+- `unwatch` and `org-delete` now require `--yes` (or a TTY prompt) before deleting anything
+  and support `--dry-run` to print the counts of events, registers, runs and notes that would
+  be removed; without `--yes` nothing is deleted and the command exits with code 1 (#558).
+
 ### Fixed
 
+- The CLI answers an unknown flag, or a flag missing its value, with one line that names the
+  flag, suggests the closest known one and points to `concord --help`, instead of Node's raw
+  parser message (#581).
 - Register imports reject as-of times more than five minutes in the future (#100).
 
 ### Added
 
+- A four-eyes rule for sign-off (#539): with `requireSecondSigner` on (`PATCH /api/org/settings`,
+  owners only; off by default), a break cannot be resolved by the person who acknowledged it or
+  who imported the register. Schema: `ORG_MIGRATIONS` entry 10 adds `registers.imported_by_id`.
+- Assign a break to a workspace member (`PUT /api/assets/:id/notes/assignee`) and list current
+  breaks by owner (`GET /api/assets/:id/breaks?assignee=<id|none>`); the owner is in break payloads
+  and the breaks CSV (#563). Schema: `ORG_MIGRATIONS` entry 9 adds `break_notes.assignee_id` and
+  `assignee_label`.
+- Workspace webhooks (#562): an owner sets an https endpoint (`PUT /api/org/webhook`) that gets an
+  HMAC-signed POST (`x-concord-signature`) when a run or a corporate action has breaks, or a sync
+  starts failing. Private, loopback and metadata addresses are refused, checked again at connect
+  time; redirects are not followed and failed deliveries are retried, then logged.
+- `concord reconcile-all` reconciles every asset that has a register in one command, continuing
+  past an asset that fails and summarising each result; `--fail-on-breaks` exits 2 when any
+  asset has open breaks (#560).
+- A printable HTML report of a reconciliation run, with its summary, coverage, register and run
+  digests, and break sign-off history (`GET /api/reconciliations/:id/report`) (#552).
+- `Concord.diffRegisters(asset, fromId, toId)` compares two registers of one asset by
+  `holder_id`: holders added and removed, and holders whose units, accounts or statuses changed,
+  each list sorted by holder id (#566).
+- `Concord.diffRuns(fromId, toId)` compares two reconciliation runs of one asset: each break key
+  is new, resolved, persisting, or changed when its fingerprint differs, every list sorted by
+  key (#567).
+- Dividend withholding (#570): `withholdingRate` and per-address `withholdingOverrides` on a
+  dividend. The expected payment is the net of withholding, applied after the gross is rounded,
+  and the action's result lines show `gross`, `withheld` and `net` (also in the audit pack).
+- A per-asset reconciliation `tolerance` (smallest units): a holder whose chain and register
+  balances differ by no more than it is treated as matched. Schema: `ORG_MIGRATIONS` v5 adds
+  `assets.tolerance` (#564).
+- Void a corporate action entered in error (`POST /api/actions/:id/void`, reason required) (#544).
+  It keeps its place in the audit trail with no open breaks. Schema: `ORG_MIGRATIONS` entry 8 adds
+  `actions.voided_at`, `voided_by` and `void_reason`.
+- The runs list reads summary columns instead of parsing every stored result body (#531).
+  Schema: `ORG_MIGRATIONS` entry 7 adds `runs.summary`, `status`, `chain_behind` and `open_breaks`,
+  backfilled from existing results.
+- Holdings checkpoints (#576): historical holdings (`asOf`), corporate-action snapshots and the
+  current holdings replay from the nearest stored checkpoint, so their cost near the tip no longer
+  grows with the length of the history. Results are unchanged. Schema: `ORG_MIGRATIONS` entry 6
+  adds the `holdings_checkpoints` table and the `events_asset_ledger` index on `events`.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,

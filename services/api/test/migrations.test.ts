@@ -43,9 +43,85 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("opens the v3 workspace database with the actions_due index", () => {
+    upgraded("org-v3.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v3");
+    });
+  });
+
+  it("opens the v2 workspace database with default matching windows and keeps v4 custom windows", () => {
+    upgraded("org-v2.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 72, movement_window_hours: 24 });
+    });
+    upgraded("org-v4.db", ORG_MIGRATIONS, (db) => {
+      const row = db.get<{ instruction_window_hours: number; movement_window_hours: number }>(
+        "SELECT instruction_window_hours, movement_window_hours FROM assets WHERE id = 'usd-mainnet'",
+      );
+      expect(row).toEqual({ instruction_window_hours: 48, movement_window_hours: 12 });
+    });
+  });
+
+  it("opens the v5 workspace database and reads the tolerance column", () => {
+    upgraded("org-v5.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v5");
+      expect(db.get<{ tolerance: string }>("SELECT tolerance FROM assets WHERE id = 'usd-mainnet'")?.tolerance).toBe("5");
+    });
+  });
+
+  it("opens the v9 workspace database with each break's owner intact", () => {
+    upgraded("org-v9.db", ORG_MIGRATIONS, (db) => {
+      const note = db.get<{ assignee_id: string; assignee_label: string; status: string }>(
+        "SELECT assignee_id, assignee_label, status FROM break_notes WHERE key = 'SUPPLY_MISMATCH'",
+      );
+      expect(note).toMatchObject({ assignee_id: "u2", assignee_label: "Bob <bob@example.org>", status: "acknowledged" });
+    });
+  });
+
   it("backfills sign-off history from the v1 notes when upgrading", () => {
     upgraded("org-v1.db", ORG_MIGRATIONS, (db) => {
       expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM break_note_history")?.n).toBe(0);
+    });
+  });
+
+  it("adds an empty holdings checkpoint table and the event ledger index to a v5 workspace database", () => {
+    upgraded("org-v5.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM holdings_checkpoints")?.n).toBe(0);
+      expect(db.get("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'events_asset_ledger'")).toBeDefined();
+    });
+  });
+
+  it("opens the v6 workspace database and keeps its holdings checkpoints", () => {
+    upgraded("org-v6.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v6");
+      expect(db.get<{ ledger: number }>("SELECT ledger FROM holdings_checkpoints WHERE asset_id = 'usd-mainnet'")?.ledger).toBe(100);
+    });
+  });
+
+  it("opens the v7 workspace database and keeps its runs list columns", () => {
+    upgraded("org-v7.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v7");
+      expect(db.get<{ status: string; open_breaks: number }>("SELECT status, open_breaks FROM runs")).toEqual({
+        status: "breaks",
+        open_breaks: 1,
+      });
+    });
+  });
+
+  it("opens the v8 workspace database and keeps a voided action's trail", () => {
+    upgraded("org-v8.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v8");
+      expect(db.get("SELECT voided_by, void_reason FROM actions WHERE id = 2")).toEqual({ voided_by: "bob", void_reason: "typo in the rate" });
+      expect(db.get<{ voided_at: string | null }>("SELECT voided_at FROM actions WHERE id = 1")?.voided_at).toBeNull();
+    });
+  });
+
+  it("opens the v10 workspace database and keeps who imported each register", () => {
+    upgraded("org-v10.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v10");
+      expect(db.get<{ imported_by_id: string }>("SELECT imported_by_id FROM registers WHERE id = 1")?.imported_by_id).toBe("u1");
     });
   });
 

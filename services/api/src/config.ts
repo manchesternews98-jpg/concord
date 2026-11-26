@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import type { SqliteSynchronous } from "./db.js";
 
 export type NetworkName = "mainnet" | "testnet";
 export const NETWORK_NAMES: readonly NetworkName[] = ["mainnet", "testnet"];
@@ -48,10 +50,16 @@ export interface Config {
   defaultNetwork: NetworkName;
   /** Holds control.db and one database per workspace under orgs/. */
   dataDir: string;
+  sqliteSynchronous: SqliteSynchronous;
+  checkOnOpen: boolean;
   host: string;
   port: number;
   /** Seconds between indexer passes. 0 disables the background indexer. */
   syncIntervalSec: number;
+  /** Assets of one network the indexer works on at once. */
+  syncConcurrency: number;
+  /** Seconds one asset may index in a pass before yielding to the next one. 0 means no limit. */
+  syncAssetBudgetSec: number;
   webDir: string;
   /** The origin users reach the service on. Decides cookie flags and the OAuth redirect. */
   publicUrl: string;
@@ -64,6 +72,8 @@ export interface Config {
   maxInvitesPerOrg: number;
   /** The host discards the data directory on restart. Shown to users rather than hidden. */
   ephemeral: boolean;
+  /** Optional ed25519 private key in PEM format to sign audit packs. */
+  signingKey?: string;
   google?: { clientId: string; clientSecret: string };
   /** scrypt work factors for new password hashes. Unset keeps the built-in default. */
   passwordCost?: { N: number; r: number; p: number };
@@ -80,12 +90,12 @@ const RETIRED: Record<string, string> = {
 
 /** Recognized runtime settings, including the CLI-only workspace selector. */
 const KNOWN_CONCORD_SETTINGS = [
-  "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
-  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_HOST",
+  "CONCORD_CHECK_ON_OPEN", "CONCORD_DATA_DIR", "CONCORD_DEFAULT_NETWORK", "CONCORD_EPHEMERAL",
+  "CONCORD_GOOGLE_CLIENT_ID", "CONCORD_GOOGLE_CLIENT_SECRET", "CONCORD_GOOGLE_CLIENT_SECRET_FILE", "CONCORD_HOST",
   "CONCORD_MAINNET_HORIZON_URLS", "CONCORD_MAINNET_RPC_URLS",
   "CONCORD_MAX_ASSETS", "CONCORD_MAX_INVITES", "CONCORD_ORG", "CONCORD_PASSWORD_COST",
-  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS",
-  "CONCORD_SIGNUP", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
+  "CONCORD_PORT", "CONCORD_PUBLIC_URL", "CONCORD_RPC_HEADERS", "CONCORD_RPC_HEADERS_FILE",
+  "CONCORD_SIGNING_KEY", "CONCORD_SIGNUP", "CONCORD_SQLITE_SYNCHRONOUS", "CONCORD_SYNC_ASSET_BUDGET", "CONCORD_SYNC_CONCURRENCY", "CONCORD_SYNC_INTERVAL", "CONCORD_TESTNET_HORIZON_URLS",
   "CONCORD_TESTNET_RPC_URLS", "CONCORD_TRUST_PROXY", "CONCORD_USER_AGENT_SUFFIX", "CONCORD_WEB_DIR",
 ] as const;
 const KNOWN_SETTINGS = new Set<string>(KNOWN_CONCORD_SETTINGS);
@@ -111,6 +121,22 @@ function warnUnknownSettings(env: NodeJS.ProcessEnv, warn: (message: string) => 
     })).sort((a, b) => a.distance - b.distance)[0];
     const suggestion = closest && closest.distance <= 4 ? `; did you mean ${closest.candidate}?` : "";
     warn(`Unknown Concord setting ${name}${suggestion}`);
+  }
+}
+
+/** Secrets may be provided by mounted files instead of process environment values. */
+function secretValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const direct = env[name];
+  const filePath = env[`${name}_FILE`];
+  if (direct !== undefined && filePath !== undefined) {
+    throw new Error(`Set either ${name} or ${name}_FILE, not both`);
+  }
+  if (filePath === undefined) return direct;
+  if (!filePath) throw new Error(`${name}_FILE must be a readable file path`);
+  try {
+    return readFileSync(filePath, "utf8").replace(/\r?\n$/, "");
+  } catch {
+    throw new Error(`${name}_FILE could not be read`);
   }
 }
 
@@ -192,10 +218,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     throw new Error("CONCORD_USER_AGENT_SUFFIX must be at most 120 printable ASCII characters");
   }
 
+  const rpcHeaders = secretValue(env, "CONCORD_RPC_HEADERS");
   let headers: Record<string, Record<string, string>> = {};
-  if (env.CONCORD_RPC_HEADERS) {
+  if (rpcHeaders) {
     try {
-      const parsed = JSON.parse(env.CONCORD_RPC_HEADERS);
+      const parsed = JSON.parse(rpcHeaders);
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error();
       }
@@ -264,13 +291,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
   }
   publicUrl = parsedPublicUrl.origin;
 
+  const sqliteSynchronous = env.CONCORD_SQLITE_SYNCHRONOUS ?? "normal";
+  if (sqliteSynchronous !== "normal" && sqliteSynchronous !== "full") {
+    throw new Error("CONCORD_SQLITE_SYNCHRONOUS must be normal or full");
+  }
+
   const config: Config = {
     networks: { mainnet: network("mainnet"), testnet: network("testnet") },
     defaultNetwork,
     dataDir: env.CONCORD_DATA_DIR ? resolve(ROOT, env.CONCORD_DATA_DIR) : resolve(ROOT, "data"),
+    sqliteSynchronous,
+    checkOnOpen: flag(env, "CONCORD_CHECK_ON_OPEN"),
     host,
     port,
     syncIntervalSec: integer(env, "CONCORD_SYNC_INTERVAL", 30),
+    syncConcurrency: integer(env, "CONCORD_SYNC_CONCURRENCY", 4, 1, 32),
+    syncAssetBudgetSec: integer(env, "CONCORD_SYNC_ASSET_BUDGET", 60, 0, 3600),
     webDir: env.CONCORD_WEB_DIR ? resolve(ROOT, env.CONCORD_WEB_DIR) : resolve(ROOT, "apps/web/dist"),
     publicUrl,
     trustProxyHops: integer(env, "CONCORD_TRUST_PROXY", 0, 0, 10),
@@ -279,6 +315,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     maxInvitesPerOrg: integer(env, "CONCORD_MAX_INVITES", 100, 1, 10000),
     ephemeral: flag(env, "CONCORD_EPHEMERAL", false),
   };
+  if (env.CONCORD_SIGNING_KEY) {
+    config.signingKey = resolve(ROOT, env.CONCORD_SIGNING_KEY);
+  }
   if (env.CONCORD_PASSWORD_COST) {
     // N:r:p. Each stored hash carries the factors it was made with, so this can change at any time.
     const [N, r, p] = env.CONCORD_PASSWORD_COST.split(":").map(Number);
@@ -293,7 +332,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, warn: (message:
     config.passwordCost = { N: N!, r: r!, p: p! };
   }
   const clientId = env.CONCORD_GOOGLE_CLIENT_ID;
-  const clientSecret = env.CONCORD_GOOGLE_CLIENT_SECRET;
+  const clientSecret = secretValue(env, "CONCORD_GOOGLE_CLIENT_SECRET");
   if (clientId || clientSecret) {
     if (!clientId || !clientSecret) {
       throw new Error("set both CONCORD_GOOGLE_CLIENT_ID and CONCORD_GOOGLE_CLIENT_SECRET, or neither");
